@@ -6,7 +6,7 @@ echo "=========================================================="
 echo "    YOURLS & CLOUDFLARE TUNNEL MULTI-TENANT DEPLOY       "
 echo "=========================================================="
 echo "💡 Note: For options with brackets like [default], simply"
-echo "   press Enter to keep and apply the default value."
+echo "    press Enter to keep and apply the default value."
 echo "=========================================================="
 echo ""
 
@@ -72,6 +72,10 @@ mkdir -p "$YOURLS_DATA_DIR"
 mkdir -p "$DB_DATA_DIR"
 mkdir -p "$PLUGINS_DIR"
 
+# Ensure MariaDB container (UID 999) has full read-write access to its data directory
+sudo chown -R 999:999 "$DB_DATA_DIR"
+sudo chmod -R 770 "$DB_DATA_DIR"
+
 # 3. Clone the plugin stack using a secure shell fallback inside standard alpine
 echo "📥 Downloading YOURLS plugins using temporary Docker helper..."
 sudo docker run --rm \
@@ -99,9 +103,9 @@ if ( $_SERVER['REQUEST_URI'] == '/' ) {
 ?>
 EOF
 
-# Standardize web server permissions for the directory
+# Grant www-data (UID 33) full read-write access for the web app and plugins
 sudo chown -R 33:33 "$YOURLS_DATA_DIR"
-sudo chmod -R 755 "$YOURLS_DATA_DIR"
+sudo chmod -R 775 "$YOURLS_DATA_DIR"
 
 # 5. Generate the domain-isolated docker-compose.yaml (Using standard filename for Synology)
 echo "📝 Generating isolated Docker Compose configuration..."
