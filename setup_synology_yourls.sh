@@ -1,121 +1,185 @@
 #!/bin/bash
-
-# Clear screen for clean output
+set -e
 clear
 
-echo "=================================================="
-echo "   YOURLS & Cloudflare Tunnel Setup for Synology  "
-echo "=================================================="
+echo "=========================================================="
+echo "    YOURLS & CLOUDFLARE TUNNEL MULTI-TENANT DEPLOY       "
+echo "=========================================================="
+echo "💡 Note: For options with brackets like [default], simply"
+echo "   press Enter to keep and apply the default value."
+echo "=========================================================="
 echo ""
 
-# Interactive Variable Collection
-read -p "Enter Project Directory [/volume1/docker/yourls-qr-asfec-sa]: " PROJECT_DIR
-PROJECT_DIR=${PROJECT_DIR:-"/volume1/docker/yourls-qr-asfec-sa"}
+# 1. Prompt the user for variables
+read -p "Enter your Domain (e.g., yourls.YourDomain.com): " DOMAIN
 
-read -p "Enter Database Root Password [Asfec2024]: " MYSQL_ROOT_PASSWORD
-MYSQL_ROOT_PASSWORD=${MYSQL_ROOT_PASSWORD:-"Asfec2024"}
-
-read -p "Enter Database Name [yourls]: " MYSQL_DATABASE
-MYSQL_DATABASE=${MYSQL_DATABASE:-"yourls"}
-
-read -p "Enter Database User [yourls]: " MYSQL_USER
-MYSQL_USER=${MYSQL_USER:-"yourls"}
-
-read -p "Enter Database Password [Alsunni2010]: " MYSQL_PASSWORD
-MYSQL_PASSWORD=${MYSQL_PASSWORD:-"Alsunni2010"}
-
-read -p "Enter YOURLS Admin Username [laith]: " YOURLS_USER
-YOURLS_USER=${YOURLS_USER:-"laith"}
-
-read -p "Enter YOURLS Admin Password [Alsunni2010]: " YOURLS_PASS
-YOURLS_PASS=${YOURLS_PASS:-"Alsunni2010"}
-
-read -p "Enter YOURLS Domain (with https://) [https://qr.asfec.sa]: " YOURLS_SITE
-YOURLS_SITE=${YOURLS_SITE:-"https://qr.asfec.sa"}
-
-read -p "Enter Cloudflare Tunnel Token: " TUNNEL_TOKEN
-
-# Validate required Cloudflare Tunnel Token input
-if [ -z "$TUNNEL_TOKEN" ]; then
-  echo -e "\nError: Cloudflare Tunnel Token is required. Exiting..."
-  exit 1
+if [ -z "$DOMAIN" ]; then
+    echo "❌ Error: Domain cannot be left blank."
+    exit 1
 fi
 
-# Define directory structures
-MARIADB_DIR="$PROJECT_DIR/mariadb"
-HTML_DIR="$PROJECT_DIR/html-user"
+# Clean up domain format to strip protocol or trailing slashes
+DOMAIN=$(echo "$DOMAIN" | sed -e 's|^[^/]*//||' -e 's|/.*||')
 
-echo -e "\n--> Creating project directories at $PROJECT_DIR..."
-mkdir -p "$MARIADB_DIR" "$HTML_DIR"
+# Sanitize domain for safe Docker container and folder naming (replace dots with dashes)
+SAFE_DOMAIN=$(echo "$DOMAIN" | tr '.' '-')
+PROJECT_NAME="yourls-$SAFE_DOMAIN"
 
-# Set correct ownership for MariaDB (UID/GID 999 is standard for official MariaDB/MySQL containers)
-echo "--> Fixing directory permissions for MariaDB and YOURLS..."
-chown -R 999:999 "$MARIADB_DIR"
-chmod -R 755 "$PROJECT_DIR"
+# Prompt for Synology Volume/Base Directory Path
+echo "➔ Where is your Docker folder located?"
+read -p "  Enter Synology volume path (Press Enter for default [/volume1]): " VOL_PATH
 
-echo "--> Generating docker-compose.yml..."
-cat << EOF > "$PROJECT_DIR/docker-compose.yml"
+VOL_PATH=${VOL_PATH:-/volume1}
+
+# Strip any trailing slashes from volume path
+VOL_PATH=$(echo "$VOL_PATH" | sed 's|/*$||')
+
+echo "➔ Database Settings"
+read -p "  Enter Database Name (Press Enter for default [yourls]): " DB_NAME
+DB_NAME=${DB_NAME:-yourls}
+
+read -p "  Enter Database User (Press Enter for default [yourls]): " DB_USER
+DB_USER=${DB_USER:-yourls}
+
+read -sp "  Enter Database Password (Required - No Default): " DB_PASS
+echo ""
+
+echo "➔ YOURLS Administration Credentials"
+read -p "  Enter YOURLS Admin Username (Press Enter for default [admin]): " ADMIN_USER
+ADMIN_USER=${ADMIN_USER:-admin}
+
+read -sp "  Enter YOURLS Admin Password (Required - No Default): " ADMIN_PASS
+echo ""
+
+echo "➔ Cloudflare Integration"
+read -p "  Enter your Cloudflare Tunnel Token (Required - No Default): " TUNNEL_TOKEN
+echo -e "\n==========================================================\n"
+
+# Validate remaining required variables
+if [ -z "$DB_PASS" ] || [ -z "$ADMIN_USER" ] || [ -z "$ADMIN_PASS" ] || [ -z "$TUNNEL_TOKEN" ]; then
+    echo "❌ Error: Required fields (Passwords & Tunnel Token) cannot be left blank."
+    exit 1
+fi
+
+# 2. Define dynamic, domain-isolated directory structures
+BASE_DIR="$VOL_PATH/docker/$PROJECT_NAME"
+YOURLS_DATA_DIR="$BASE_DIR/html-user"
+DB_DATA_DIR="$BASE_DIR/mariadb"
+PLUGINS_DIR="$YOURLS_DATA_DIR/plugins"
+
+echo "📂 Creating clean isolated project directories at: $BASE_DIR"
+mkdir -p "$YOURLS_DATA_DIR"
+mkdir -p "$DB_DATA_DIR"
+mkdir -p "$PLUGINS_DIR"
+
+# 3. Clone the plugin stack using a secure shell fallback inside standard alpine
+echo "📥 Downloading YOURLS plugins using temporary Docker helper..."
+sudo docker run --rm \
+  -v "$PLUGINS_DIR":/plugins \
+  alpine:latest sh -c "
+    apk add --no-cache git && cd /plugins
+    git clone --depth 1 https://github.com/ozh/yourls-sample-qrcode.git qrcode || true
+    git clone --depth 1 https://github.com/williambargentball/YOURLS-Forward-Slash-In-Urls.git slashes || true
+    git clone --depth 1 https://github.com/ozh/yourls-fallback-url.git fallback || true
+    git clone --depth 1 https://github.com/gioxx/YOURLS-LogoSuite.git logosuite || true
+    git clone --depth 1 https://github.com/GautamGupta/YOURLS-Import-Export.git import-export || true
+    git clone --depth 1 https://github.com/josheby/yourls-additional-charsets.git additional-charsets || true
+    git clone --depth 1 https://github.com/master3395/YOURLS-Upload-and-Shorten-Advanced.git Upload-and-Shorten-Advanced || true
+"
+
+# 4. Create the Native Root Redirect to /admin inside the mounted volume
+echo "🔀 Configuring automatic root redirect..."
+cat << 'EOF' > "$YOURLS_DATA_DIR/theme.php"
+<?php
+// Automatic hook to redirect root domain traffic straight to the admin panel
+if ( $_SERVER['REQUEST_URI'] == '/' ) {
+    yourls_redirect( yourls_admin_url(), 301 );
+    exit;
+}
+?>
+EOF
+
+# Standardize web server permissions for the directory
+sudo chown -R 33:33 "$YOURLS_DATA_DIR"
+sudo chmod -R 755 "$YOURLS_DATA_DIR"
+
+# 5. Generate the domain-isolated docker-compose.yaml (Using standard filename for Synology)
+echo "📝 Generating isolated Docker Compose configuration..."
+cd "$BASE_DIR"
+
+cat << EOF > docker-compose.yml
 version: '3.8'
 
 services:
   db:
     image: mariadb:11.4-noble
-    container_name: db-qr-asfec-sa
+    container_name: db-$SAFE_DOMAIN
     restart: always
     environment:
-      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
-      MYSQL_DATABASE: ${MYSQL_DATABASE}
-      MYSQL_USER: ${MYSQL_USER}
-      MYSQL_PASSWORD: ${MYSQL_PASSWORD}
+      MYSQL_ROOT_PASSWORD: Asfec2024
+      MYSQL_DATABASE: $DB_NAME
+      MYSQL_USER: $DB_USER
+      MYSQL_PASSWORD: $DB_PASS
     volumes:
-      - ${MARIADB_DIR}:/var/lib/mysql
+      - $DB_DATA_DIR:/var/lib/mysql
     networks:
-      - network-qr-asfec-sa
+      - network-$SAFE_DOMAIN
 
   yourls:
     image: yourls:latest
-    container_name: web-qr-asfec-sa
+    container_name: web-$SAFE_DOMAIN
     restart: always
     depends_on:
       - db
-    ports:
-      - "8080:80"
+    expose:
+      - "8080"
     environment:
-      - YOURLS_SITE=${YOURLS_SITE}
-      - YOURLS_USER=${YOURLS_USER}
-      - YOURLS_PASS=${YOURLS_PASS}
-      - YOURLS_DB_HOST=db-qr-asfec-sa
-      - YOURLS_DB_USER=${MYSQL_USER}
-      - YOURLS_DB_PASS=${MYSQL_PASSWORD}
-      - YOURLS_DB_NAME=${MYSQL_DATABASE}
+      - YOURLS_SITE=https://$DOMAIN
+      - YOURLS_USER=$ADMIN_USER
+      - YOURLS_PASS=$ADMIN_PASS
+      - YOURLS_DB_HOST=db-$SAFE_DOMAIN
+      - YOURLS_DB_USER=$DB_USER
+      - YOURLS_DB_PASS=$DB_PASS
+      - YOURLS_DB_NAME=$DB_NAME
     volumes:
-      - ${HTML_DIR}:/var/www/html/user
+      - $YOURLS_DATA_DIR:/var/www/html/user
     networks:
-      - network-qr-asfec-sa
+      - network-$SAFE_DOMAIN
 
   tunnel:
     image: cloudflare/cloudflared:latest
-    container_name: tunnel-qr-asfec-sa
+    container_name: tunnel-$SAFE_DOMAIN
     restart: always
     command: tunnel --no-autoupdate run
     environment:
-      - TUNNEL_TOKEN=${TUNNEL_TOKEN}
+      - TUNNEL_TOKEN=$TUNNEL_TOKEN
     networks:
-      - network-qr-asfec-sa
+      - network-$SAFE_DOMAIN
     depends_on:
       - yourls
 
 networks:
-  network-qr-asfec-sa:
+  network-$SAFE_DOMAIN:
     driver: bridge
 EOF
 
-echo "--> Starting containers..."
-cd "$PROJECT_DIR"
-docker compose up -d
 
+echo "=========================================================="
+echo "🎉 CONFIGURATION PREPARED FOR: $DOMAIN"
+echo "📂 Project Directory Created: $BASE_DIR"
+echo "=========================================================="
 echo ""
-echo "=================================================="
-echo " Deployment completed successfully!"
-echo " Access YOURLS via Cloudflare: ${YOURLS_SITE}"
-echo "=================================================="
+echo "👉 FINAL STEP: CREATE THE PROJECT IN SYNOLOGY DSM 👈"
+echo "1. Open 'Container Manager' inside your Synology NAS."
+echo "2. Navigate to 'Project' (left sidebar) -> click 'Create'."
+echo "3. Fill in the following details exactly:"
+echo "   - Project Name:  $PROJECT_NAME"
+echo "   - Path:          Choose 'Set path to an existing folder'"
+echo "                    and select: $BASE_DIR"
+echo "   - Source:        Select 'Use existing docker-compose.yml'"
+echo "4. Click 'Next' -> 'Next' -> 'Done' to build and run the containers."
+echo ""
+echo "=========================================================="
+echo "⚙️  Cloudflare Target Config: HTTP://web-$SAFE_DOMAIN:8080"
+echo "🔗 Access URL (After setup): https://$DOMAIN/admin/"
+echo "=========================================================="
